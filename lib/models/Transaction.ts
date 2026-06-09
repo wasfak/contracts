@@ -35,9 +35,10 @@ const TransactionSchema = new Schema(
   { timestamps: true }
 );
 
-// Re-uploading the same report period overwrites instead of duplicating.
+// One row per (kind, code, supplier, period) — purchases have multiple suppliers
+// per code so supplier must be part of the key.
 TransactionSchema.index(
-  { kind: 1, code: 1, periodFrom: 1, periodTo: 1 },
+  { kind: 1, code: 1, supplier: 1, periodFrom: 1, periodTo: 1 },
   { unique: true }
 );
 

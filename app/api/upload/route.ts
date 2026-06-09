@@ -5,62 +5,49 @@ import { parseReport } from "@/lib/parseReport";
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
-  const form = await request.formData();
-  const file = form.get("file");
+const CHUNK = 50;
 
-  if (!(file instanceof File)) {
-    return NextResponse.json(
-      { error: "No file uploaded. Send a `file` field." },
-      { status: 400 }
-    );
-  }
-
-  if (!/\.html?$/i.test(file.name)) {
-    return NextResponse.json(
-      { error: "Only .htm or .html files are supported." },
-      { status: 400 }
-    );
-  }
-
+async function processFile(file: File) {
   const html = await file.text();
   const report = parseReport(html);
 
   if (report.rows.length === 0) {
-    return NextResponse.json(
-      { error: "No data rows found. Is this the expected report format?" },
-      { status: 422 }
-    );
+    return { file: file.name, error: "No data rows found." };
   }
 
-  await connectDB();
-
-  // One round-trip, unordered: upsert keeps re-uploads idempotent without
-  // hammering the DB with per-row writes.
-  const ops = report.rows.map((row) => ({
-    updateOne: {
-      filter: {
-        kind: report.kind,
-        code: row.code,
-        periodFrom: report.periodFrom,
-        periodTo: report.periodTo,
-      },
-      update: {
-        $set: {
-          kind: report.kind,
-          pharmacy: report.pharmacy,
-          periodFrom: report.periodFrom,
-          periodTo: report.periodTo,
-          ...row,
-        },
-      },
-      upsert: true,
-    },
+  const docs = report.rows.map((row) => ({
+    kind: report.kind,
+    pharmacy: report.pharmacy,
+    periodFrom: report.periodFrom,
+    periodTo: report.periodTo,
+    ...row,
   }));
 
-  const result = await Transaction.bulkWrite(ops, { ordered: false });
+  // Split into chunks then fire all chunks in parallel.
+  const chunks: (typeof docs)[] = [];
+  for (let i = 0; i < docs.length; i += CHUNK) chunks.push(docs.slice(i, i + CHUNK));
 
-  return NextResponse.json({
+  // insertMany is faster than bulkWrite upserts — no index lookup per row.
+  // ordered:false lets chunks continue past any duplicate-key errors so
+  // re-uploading the same file is safe (duplicates are skipped, not fatal).
+  const insertResults = await Promise.all(
+    chunks.map((chunk) =>
+      Transaction.insertMany(chunk, { ordered: false }).catch((err) => {
+        // E11000 = duplicate key — already exists, skip silently.
+        if (err?.code === 11000 || err?.name === "MongoBulkWriteError") return err.result ?? { insertedCount: 0 };
+        throw err;
+      })
+    )
+  );
+
+  const upsertedCount = insertResults.reduce(
+    (s, r) => s + (r?.insertedCount ?? 0),
+    0
+  );
+  const modifiedCount = 0;
+
+  return {
+    file: file.name,
     kind: report.kind,
     pharmacy: report.pharmacy,
     period: {
@@ -68,7 +55,37 @@ export async function POST(request: Request) {
       to: report.periodTo.toISOString().slice(0, 10),
     },
     parsed: report.rows.length,
-    inserted: result.upsertedCount,
-    updated: result.modifiedCount,
-  });
+    inserted: upsertedCount,
+    updated: modifiedCount,
+  };
+}
+
+export async function POST(request: Request) {
+  const form = await request.formData();
+  const entries = form.getAll("file");
+
+  const files = entries.filter((e): e is File => e instanceof File);
+  if (files.length === 0) {
+    return NextResponse.json(
+      { error: "No files uploaded. Send one or more `file` fields." },
+      { status: 400 }
+    );
+  }
+
+  const invalid = files.filter((f) => !/\.html?$/i.test(f.name));
+  if (invalid.length > 0) {
+    return NextResponse.json(
+      {
+        error: `Only .htm/.html files are supported. Rejected: ${invalid.map((f) => f.name).join(", ")}`,
+      },
+      { status: 400 }
+    );
+  }
+
+  await connectDB();
+
+  // All files processed in parallel, chunks within each file also in parallel.
+  const results = await Promise.all(files.map(processFile));
+
+  return NextResponse.json({ results });
 }
