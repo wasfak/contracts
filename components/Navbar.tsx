@@ -18,7 +18,7 @@ export default function Navbar() {
   const { isSignedIn } = useAuth();
 
   return (
-    <header className="fixed top-0 left-0 right-0 z-50 flex justify-center pt-4 px-4 pointer-events-none">
+    <header className=" flex justify-center pt-4 px-4 pointer-events-none">
       <nav className="pointer-events-auto flex items-center justify-between gap-4 rounded-2xl border border-white/20 bg-white/10 px-4 py-2.5 shadow-lg shadow-black/10 backdrop-blur-md w-full max-w-2xl">
         {/* Brand */}
         <span className="text-sm font-bold tracking-tight text-zinc-800 whitespace-nowrap">

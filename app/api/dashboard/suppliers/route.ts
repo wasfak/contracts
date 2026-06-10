@@ -11,9 +11,13 @@ export async function POST(request: Request) {
 
   await connectDB();
 
+  // Only suppliers with at least one real (non-zero quantity) purchase row.
+  // This drops the manufacturer's 0-amount/0-qty placeholder rows, which are
+  // the producer (المنشأ) rather than an actual distributor.
   const result = await Transaction.distinct("supplier", {
     code: { $in: codes },
     kind: "purchase",
+    quantity: { $ne: 0 },
   });
 
   return NextResponse.json({ suppliers: (result as string[]).filter(Boolean).sort() });

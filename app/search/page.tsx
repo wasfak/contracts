@@ -58,6 +58,36 @@ function nextDir(current: SortDir): "asc" | "desc" {
   return current === "asc" ? "desc" : "asc";
 }
 
+const PAGE_SIZE = 10;
+
+/* ─── Pagination ─────────────────────────────────────────────────────────── */
+function Pagination({ page, totalPages, onChange }: {
+  page: number; totalPages: number; onChange: (p: number) => void;
+}) {
+  if (totalPages <= 1) return null;
+  return (
+    <div className="flex items-center justify-between px-3 py-2 bg-zinc-50 border-t border-zinc-200 text-sm">
+      <button
+        onClick={() => onChange(page - 1)}
+        disabled={page === 0}
+        className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
+      >
+        ← Prev
+      </button>
+      <span className="text-xs text-zinc-500">
+        Page {page + 1} of {totalPages}
+      </span>
+      <button
+        onClick={() => onChange(page + 1)}
+        disabled={page >= totalPages - 1}
+        className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed transition"
+      >
+        Next →
+      </button>
+    </div>
+  );
+}
+
 function sortRows<T>(rows: T[], sort: SortState<string>): T[] {
   if (!sort) return rows;
   return [...rows].sort((a, b) => {
@@ -101,11 +131,13 @@ type SaleKey = keyof SaleRow;
 
 function SalesTable({ rows }: { rows: SaleRow[] }) {
   const [sort, setSort] = useState<SortState<SaleKey>>(null);
+  const [page, setPage] = useState(0);
 
   function handleSort(k: SaleKey) {
     setSort((prev) =>
       prev?.key === k ? { key: k, dir: nextDir(prev.dir) } : { key: k, dir: "asc" }
     );
+    setPage(0);
   }
 
   if (rows.length === 0)
@@ -116,61 +148,61 @@ function SalesTable({ rows }: { rows: SaleRow[] }) {
   const totalAmt = sorted.reduce((s, r) => s + r.amount, 0);
   const totalProfit = sorted.reduce((s, r) => s + (r.profit ?? 0), 0);
 
+  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
+  const pageRows = sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+
   const th = (label: string, k: SaleKey, cls = "") => (
     <SortableTh label={label} colKey={k} sort={sort} onSort={handleSort} className={cls} />
   );
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-zinc-200">
-      <table className="min-w-full text-sm">
-        <thead className="bg-zinc-100 text-xs font-semibold text-zinc-600 uppercase tracking-wide">
-          <tr>
-            {th("Code", "code", "text-left")}
-            {th("Name", "name", "text-left")}
-            {th("Supplier", "supplier", "text-left")}
-            {th("Qty", "quantity", "text-right")}
-            {th("Amount", "amount", "text-right")}
-            {th("Profit", "profit", "text-right")}
-            {th("Period", "periodFrom", "text-left")}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-zinc-100">
-          {sorted.map((r) => (
-            <tr key={r._id} className="hover:bg-zinc-50">
-              <td className="px-3 py-2 font-mono">{r.code}</td>
-              <td className="px-3 py-2">{r.name}</td>
-              <td className="px-3 py-2">{r.supplier}</td>
-              <td className="px-3 py-2 text-right">{fmt(r.quantity)}</td>
-              <td className="px-3 py-2 text-right">{fmt(r.amount)}</td>
-              <td
-                className={`px-3 py-2 text-right ${
-                  (r.profit ?? 0) < 0 ? "text-red-600" : "text-green-700"
-                }`}
-              >
-                {fmt(r.profit)}
-              </td>
-              <td className="px-3 py-2 text-zinc-500 text-xs">{period(r)}</td>
+    <div className="space-y-3">
+      {/* Totals bar — on top */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-semibold">
+        <span className="text-xs uppercase tracking-wide text-zinc-400">Totals</span>
+        <span>Qty: <span className="font-bold">{fmt(totalQty)}</span></span>
+        <span>Amount: <span className="font-bold">{fmt(totalAmt)}</span></span>
+        <span className={totalProfit < 0 ? "text-red-600" : "text-green-700"}>
+          Profit: <span className="font-bold">{fmt(totalProfit)}</span>
+        </span>
+        <span className="ml-auto text-xs font-normal text-zinc-400">{sorted.length} records</span>
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-zinc-200">
+        <table className="min-w-full text-sm">
+          <thead className="bg-zinc-100 text-xs font-semibold text-zinc-600 uppercase tracking-wide">
+            <tr>
+              {th("Code", "code", "text-left")}
+              {th("Name", "name", "text-left")}
+              {th("Supplier", "supplier", "text-left")}
+              {th("Qty", "quantity", "text-right")}
+              {th("Amount", "amount", "text-right")}
+              {th("Profit", "profit", "text-right")}
+              {th("Period", "periodFrom", "text-left")}
             </tr>
-          ))}
-        </tbody>
-        <tfoot className="bg-zinc-50 font-semibold border-t border-zinc-200">
-          <tr>
-            <td colSpan={3} className="px-3 py-2 text-right text-xs text-zinc-500">
-              Totals
-            </td>
-            <td className="px-3 py-2 text-right">{fmt(totalQty)}</td>
-            <td className="px-3 py-2 text-right">{fmt(totalAmt)}</td>
-            <td
-              className={`px-3 py-2 text-right ${
-                totalProfit < 0 ? "text-red-600" : "text-green-700"
-              }`}
-            >
-              {fmt(totalProfit)}
-            </td>
-            <td />
-          </tr>
-        </tfoot>
-      </table>
+          </thead>
+          <tbody className="divide-y divide-zinc-100">
+            {pageRows.map((r) => (
+              <tr key={r._id} className="hover:bg-zinc-50">
+                <td className="px-3 py-2 font-mono">{r.code}</td>
+                <td className="px-3 py-2">{r.name}</td>
+                <td className="px-3 py-2">{r.supplier}</td>
+                <td className="px-3 py-2 text-right">{fmt(r.quantity)}</td>
+                <td className="px-3 py-2 text-right">{fmt(r.amount)}</td>
+                <td
+                  className={`px-3 py-2 text-right ${
+                    (r.profit ?? 0) < 0 ? "text-red-600" : "text-green-700"
+                  }`}
+                >
+                  {fmt(r.profit)}
+                </td>
+                <td className="px-3 py-2 text-zinc-500 text-xs">{period(r)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+      </div>
     </div>
   );
 }
@@ -186,6 +218,7 @@ function PurchasesSection({ rows }: { rows: PurchaseRow[] }) {
   const [confirmed, setConfirmed] = useState(false);
   const [removeReturns, setRemoveReturns] = useState(false);
   const [sort, setSort] = useState<SortState<PurchaseKey>>(null);
+  const [page, setPage] = useState(0);
 
   function toggleSupplier(s: string) {
     setChecked((prev) => {
@@ -195,12 +228,19 @@ function PurchasesSection({ rows }: { rows: PurchaseRow[] }) {
     });
     // Changing suppliers requires re-confirmation
     setConfirmed(false);
+    setPage(0);
   }
 
   function handleSort(k: PurchaseKey) {
     setSort((prev) =>
       prev?.key === k ? { key: k, dir: nextDir(prev.dir) } : { key: k, dir: "asc" }
     );
+    setPage(0);
+  }
+
+  function toggleRemoveReturns() {
+    setRemoveReturns((v) => !v);
+    setPage(0);
   }
 
   if (rows.length === 0)
@@ -212,6 +252,9 @@ function PurchasesSection({ rows }: { rows: PurchaseRow[] }) {
 
   const totalQty = sorted.reduce((s, r) => s + r.quantity, 0);
   const totalAmt = sorted.reduce((s, r) => s + r.amount, 0);
+
+  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
+  const pageRows = sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
 
   const th = (label: string, k: PurchaseKey, cls = "") => (
     <SortableTh label={label} colKey={k} sort={sort} onSort={handleSort} className={cls} />
@@ -251,7 +294,7 @@ function PurchasesSection({ rows }: { rows: PurchaseRow[] }) {
           {/* Toolbar */}
           <div className="flex items-center gap-3">
             <button
-              onClick={() => setRemoveReturns((v) => !v)}
+              onClick={toggleRemoveReturns}
               className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${
                 removeReturns
                   ? "bg-red-600 border-red-600 text-white hover:bg-red-500"
@@ -268,72 +311,66 @@ function PurchasesSection({ rows }: { rows: PurchaseRow[] }) {
           {sorted.length === 0 ? (
             <p className="text-sm text-zinc-500">No rows to display.</p>
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-zinc-200">
-              <table className="min-w-full text-sm">
-                <thead className="bg-zinc-100 text-xs font-semibold text-zinc-600 uppercase tracking-wide">
-                  <tr>
-                    {th("Code", "code", "text-left")}
-                    {th("Name", "name", "text-left")}
-                    {th("Supplier", "supplier", "text-left")}
-                    {th("Qty", "quantity", "text-right")}
-                    {th("Unit Cost", "unitCost", "text-right")}
-                    {th("Total", "amount", "text-right")}
-                    {th("Period", "periodFrom", "text-left")}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-100">
-                  {sorted.map((r) => (
-                    <tr
-                      key={r._id}
-                      className={`hover:bg-zinc-50 ${r.amount < 0 ? "bg-red-50" : ""}`}
-                    >
-                      <td className="px-3 py-2 font-mono">{r.code}</td>
-                      <td className="px-3 py-2">{r.name}</td>
-                      <td className="px-3 py-2">{r.supplier}</td>
-                      <td
-                        className={`px-3 py-2 text-right ${
-                          r.quantity < 0 ? "text-red-600" : ""
-                        }`}
-                      >
-                        {fmt(r.quantity)}
-                      </td>
-                      <td className="px-3 py-2 text-right">{fmt(r.unitCost)}</td>
-                      <td
-                        className={`px-3 py-2 text-right font-medium ${
-                          r.amount < 0 ? "text-red-600" : ""
-                        }`}
-                      >
-                        {fmt(r.amount)}
-                      </td>
-                      <td className="px-3 py-2 text-zinc-500 text-xs">{period(r)}</td>
+            <>
+              {/* Totals bar — on top */}
+              <div className="flex flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-semibold">
+                <span className="text-xs uppercase tracking-wide text-zinc-400">
+                  {removeReturns ? "Net Totals" : "Totals"}
+                </span>
+                <span className={totalQty < 0 ? "text-red-600" : ""}>
+                  Qty: <span className="font-bold">{fmt(totalQty)}</span>
+                </span>
+                <span className={totalAmt < 0 ? "text-red-600" : ""}>
+                  Total: <span className="font-bold">{fmt(totalAmt)}</span>
+                </span>
+                <span className="ml-auto text-xs font-normal text-zinc-400">{sorted.length} records</span>
+              </div>
+
+              <div className="overflow-x-auto rounded-lg border border-zinc-200">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-zinc-100 text-xs font-semibold text-zinc-600 uppercase tracking-wide">
+                    <tr>
+                      {th("Code", "code", "text-left")}
+                      {th("Name", "name", "text-left")}
+                      {th("Supplier", "supplier", "text-left")}
+                      {th("Qty", "quantity", "text-right")}
+                      {th("Unit Cost", "unitCost", "text-right")}
+                      {th("Total", "amount", "text-right")}
+                      {th("Period", "periodFrom", "text-left")}
                     </tr>
-                  ))}
-                </tbody>
-                <tfoot className="bg-zinc-50 font-semibold border-t border-zinc-200">
-                  <tr>
-                    <td colSpan={3} className="px-3 py-2 text-right text-xs text-zinc-500">
-                      {removeReturns ? "Net Totals" : "Totals"}
-                    </td>
-                    <td
-                      className={`px-3 py-2 text-right ${
-                        totalQty < 0 ? "text-red-600" : ""
-                      }`}
-                    >
-                      {fmt(totalQty)}
-                    </td>
-                    <td />
-                    <td
-                      className={`px-3 py-2 text-right ${
-                        totalAmt < 0 ? "text-red-600" : ""
-                      }`}
-                    >
-                      {fmt(totalAmt)}
-                    </td>
-                    <td />
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-zinc-100">
+                    {pageRows.map((r) => (
+                      <tr
+                        key={r._id}
+                        className={`hover:bg-zinc-50 ${r.amount < 0 ? "bg-red-50" : ""}`}
+                      >
+                        <td className="px-3 py-2 font-mono">{r.code}</td>
+                        <td className="px-3 py-2">{r.name}</td>
+                        <td className="px-3 py-2">{r.supplier}</td>
+                        <td
+                          className={`px-3 py-2 text-right ${
+                            r.quantity < 0 ? "text-red-600" : ""
+                          }`}
+                        >
+                          {fmt(r.quantity)}
+                        </td>
+                        <td className="px-3 py-2 text-right">{fmt(r.unitCost)}</td>
+                        <td
+                          className={`px-3 py-2 text-right font-medium ${
+                            r.amount < 0 ? "text-red-600" : ""
+                          }`}
+                        >
+                          {fmt(r.amount)}
+                        </td>
+                        <td className="px-3 py-2 text-zinc-500 text-xs">{period(r)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+              </div>
+            </>
           )}
         </>
       )}

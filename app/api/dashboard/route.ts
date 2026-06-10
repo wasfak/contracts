@@ -23,12 +23,20 @@ export async function POST(request: Request) {
 
   const [
     byPeriodRaw, topProductsRaw, byDistributorRaw, salesByProductRaw, productByQuarterRaw,
-    costTrendRaw, distributorPricesRaw, returnsRaw, sourcingRaw,
+    costTrendRaw, distributorPricesRaw, returnsRaw, sourcingRaw, grossPurchaseRaw,
   ] =
     await Promise.all([
-      // Purchases + sales totals per period
+      // Purchases + sales totals per period.
+      // Supplier exclusion applies to PURCHASES only — sales must stay complete.
       Transaction.aggregate([
-        { $match: { code: { $in: codes }, ...(excludedSuppliers.length ? { supplier: { $nin: excludedSuppliers } } : {}) } },
+        {
+          $match: {
+            code: { $in: codes },
+            ...(excludedSuppliers.length
+              ? { $or: [{ kind: "sale" }, { kind: "purchase", supplier: { $nin: excludedSuppliers } }] }
+              : {}),
+          },
+        },
         {
           $group: {
             _id: { kind: "$kind", periodFrom: "$periodFrom", periodTo: "$periodTo" },
@@ -68,7 +76,8 @@ export async function POST(request: Request) {
         { $sort: { totalAmount: -1 } },
       ]),
 
-      // Sales per product (for sell-through, top 10 by sales amount)
+      // Sales per product (for sell-through) — ALL products, not just top 10,
+      // so any top-purchase product can find its matching sales.
       Transaction.aggregate([
         { $match: { code: { $in: codes }, kind: "sale" } },
         {
@@ -80,8 +89,6 @@ export async function POST(request: Request) {
             totalProfit: { $sum: { $ifNull: ["$profit", 0] } },
           },
         },
-        { $sort: { totalAmount: -1 } },
-        { $limit: 10 },
       ]),
 
       // Product-level quarterly breakdown (purchases, top 10 by total amount)
@@ -147,6 +154,19 @@ export async function POST(request: Request) {
           },
         },
       ]),
+
+      // ── Gross purchases per period (positive rows only, returns excluded) ──
+      // Lets us show what was actually ordered, separate from the net figure.
+      Transaction.aggregate([
+        { $match: { ...purchaseMatch, quantity: { $gt: 0 } } },
+        {
+          $group: {
+            _id: { periodFrom: "$periodFrom" },
+            amt: { $sum: "$amount" },
+            qty: { $sum: "$quantity" },
+          },
+        },
+      ]),
     ]);
 
   // ── merge byPeriod into one array per quarter ─────────────────────────────
@@ -199,8 +219,13 @@ export async function POST(request: Request) {
     .map((p) => ({ ...p, avgUnitCost: Math.round((costMap.get(p.label) ?? 0) * 100) / 100 }));
 
   // ── distributor share % ───────────────────────────────────────────────────
-  const totalDistAmt = byDistributorRaw.reduce((s: number, r: { totalAmount: number }) => s + r.totalAmount, 0);
-  const byDistributor = byDistributorRaw.map((r: { _id: string; totalAmount: number; totalQty: number }) => ({
+  // Drop placeholder rows that are the manufacturer (المنشأ), not a real
+  // distributor: those carry 0 amount AND 0 quantity for every product.
+  const realDistributors = byDistributorRaw.filter(
+    (r: { totalAmount: number; totalQty: number }) => r.totalAmount !== 0 || r.totalQty !== 0
+  );
+  const totalDistAmt = realDistributors.reduce((s: number, r: { totalAmount: number }) => s + r.totalAmount, 0);
+  const byDistributor = realDistributors.map((r: { _id: string; totalAmount: number; totalQty: number }) => ({
     supplier: r._id || "Unknown",
     totalAmount: r.totalAmount,
     totalQty: r.totalQty,
@@ -253,12 +278,27 @@ export async function POST(request: Request) {
   const totalProfitAll = byPeriod.reduce((s, p) => s + p.salesProfit, 0);
   const totalSalesAll = byPeriod.reduce((s, p) => s + p.salesAmount, 0);
 
+  // Unit-based sell-through (units sold ÷ units bought) — not distorted by price.
+  const totalPurchaseQty2025 = year2025.reduce((s, p) => s + p.purchaseQty, 0);
+  const totalSalesQty2025 = year2025.reduce((s, p) => s + p.salesQty, 0);
+
+  // ── gross purchases (before returns) per quarter, summed by year ──────────
+  const grossMap = new Map<string, { amt: number; qty: number }>();
+  for (const r of grossPurchaseRaw as { _id: { periodFrom: Date }; amt: number; qty: number }[]) {
+    grossMap.set(quarterLabel(r._id.periodFrom), { amt: r.amt, qty: r.qty });
+  }
+  const grossPurchase2025 = year2025.reduce((s, p) => s + (grossMap.get(p.label)?.amt ?? 0), 0);
+  const grossPurchase2026 = year2026.reduce((s, p) => s + (grossMap.get(p.label)?.amt ?? 0), 0);
+
   const kpi = {
     totalPurchase2025: year2025.reduce((s, p) => s + p.purchaseAmount, 0),
+    grossPurchase2025,
     totalSales2025: year2025.reduce((s, p) => s + p.salesAmount, 0),
     totalProfit2025: year2025.reduce((s, p) => s + p.salesProfit, 0),
     ytdPurchase2026: year2026.reduce((s, p) => s + p.purchaseAmount, 0),
+    grossPurchase2026,
     ytdSales2026: year2026.reduce((s, p) => s + p.salesAmount, 0),
+    unitSellThrough2025: totalPurchaseQty2025 > 0 ? (totalSalesQty2025 / totalPurchaseQty2025) * 100 : 0,
     grossMargin: totalSalesAll > 0 ? (totalProfitAll / totalSalesAll) * 100 : 0,
     returnsRate: returnsRate * 100,
     returnValue: Math.abs(returnValue),
@@ -304,6 +344,60 @@ export async function POST(request: Request) {
     .sort((a, b) => b.potentialSaving - a.potentialSaving)
     .slice(0, 12);
 
+  // ── Best distributor scorecard ────────────────────────────────────────────
+  // Effective unit cost (amount ÷ quantity) already reflects bonus/free units,
+  // because bonus units are recorded in quantity for the same money. On products
+  // bought from ≥2 distributors we compare head-to-head: who is cheapest, by how
+  // much, and how much extra you paid by NOT always buying from the cheapest.
+  type SupAgg = {
+    supplier: string; amt: number; qty: number;
+    shared: number; wins: number; premiumPctSum: number; overpay: number;
+  };
+  const supAgg = new Map<string, SupAgg>();
+  const getSup = (s: string) => {
+    let e = supAgg.get(s);
+    if (!e) { e = { supplier: s, amt: 0, qty: 0, shared: 0, wins: 0, premiumPctSum: 0, overpay: 0 }; supAgg.set(s, e); }
+    return e;
+  };
+
+  for (const v of codePriceMap.values()) {
+    for (const s of v.suppliers) {
+      const e = getSup(s.supplier || "Unknown");
+      e.amt += s.unitCost * s.qty;
+      e.qty += s.qty;
+    }
+    if (v.suppliers.length >= 2) {
+      const min = Math.min(...v.suppliers.map((x) => x.unitCost));
+      for (const s of v.suppliers) {
+        const e = getSup(s.supplier || "Unknown");
+        e.shared += 1;
+        if (s.unitCost <= min * 1.0001) e.wins += 1;
+        e.premiumPctSum += min > 0 ? ((s.unitCost - min) / min) * 100 : 0;
+        e.overpay += (s.unitCost - min) * s.qty;
+      }
+    }
+  }
+
+  const distributorScore = Array.from(supAgg.values())
+    .map((e) => ({
+      supplier: e.supplier,
+      totalSpend: Math.round(e.amt),
+      units: Math.round(e.qty),
+      effectiveUnitCost: e.qty > 0 ? Math.round((e.amt / e.qty) * 100) / 100 : 0,
+      sharedProducts: e.shared,
+      wins: e.wins,
+      winRate: e.shared > 0 ? Math.round((e.wins / e.shared) * 100) : null,
+      avgPremiumPct: e.shared > 0 ? Math.round((e.premiumPctSum / e.shared) * 10) / 10 : null,
+      estimatedOverpay: Math.round(e.overpay),
+    }))
+    // best value first: lowest average premium; sole-suppliers (no head-to-head) last
+    .sort((a, b) => {
+      if (a.avgPremiumPct == null && b.avgPremiumPct == null) return b.totalSpend - a.totalSpend;
+      if (a.avgPremiumPct == null) return 1;
+      if (b.avgPremiumPct == null) return -1;
+      return a.avgPremiumPct - b.avgPremiumPct;
+    });
+
   // ── product quarterly breakdown ──────────────────────────────────────────
   // Find top 8 products by total purchase amount
   const productTotals = new Map<string, { name: string; total: number }>();
@@ -331,5 +425,5 @@ export async function POST(request: Request) {
     return entry;
   });
 
-  return NextResponse.json({ byPeriod, topProducts: sellThrough, byDistributor, kpi, productByQuarter, quarters, priceComparison });
+  return NextResponse.json({ byPeriod, topProducts: sellThrough, byDistributor, kpi, productByQuarter, quarters, priceComparison, distributorScore });
 }

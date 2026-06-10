@@ -22,6 +22,11 @@ interface PriceComparison {
   spread: number; spreadPct: number;
   potentialSaving: number; supplierCount: number;
 }
+interface DistributorScore {
+  supplier: string; totalSpend: number; units: number;
+  effectiveUnitCost: number; sharedProducts: number; wins: number;
+  winRate: number | null; avgPremiumPct: number | null; estimatedOverpay: number;
+}
 interface ProductData {
   code: string; name: string;
   purchaseQty: number; purchaseAmount: number;
@@ -30,8 +35,9 @@ interface ProductData {
 }
 interface DistributorData { supplier: string; totalAmount: number; totalQty: number; share: number; }
 interface KPI {
-  totalPurchase2025: number; totalSales2025: number; totalProfit2025: number;
-  ytdPurchase2026: number; ytdSales2026: number;
+  totalPurchase2025: number; grossPurchase2025: number; totalSales2025: number; totalProfit2025: number;
+  ytdPurchase2026: number; grossPurchase2026: number; ytdSales2026: number;
+  unitSellThrough2025: number;
   grossMargin: number; returnsRate: number; returnValue: number; returnQty: number;
   deadStockCount: number; purchasedCodes: number;
 }
@@ -41,6 +47,7 @@ interface DashboardData {
   productByQuarter: Record<string, string | number>[];
   quarters: string[];
   priceComparison: PriceComparison[];
+  distributorScore: DistributorScore[];
 }
 
 /* ─── color palette ──────────────────────────────────────────────────────── */
@@ -204,8 +211,19 @@ export default function DashboardPage() {
   }
 
   // ── YoY data: one metric, quarter groups of 2025 vs 2026 ─────────────────
+  // Derive the quarter numbers actually present rather than hardcoding Q1/Q2.
+  const yoyQuarters = data
+    ? Array.from(
+        new Set(
+          data.byPeriod
+            .map((p) => p.label.match(/^Q(\d)/)?.[1])
+            .filter((q): q is string => Boolean(q))
+        )
+      ).sort()
+    : [];
   const yoyData = data
-    ? (["Q1", "Q2"] as const).map((q) => {
+    ? yoyQuarters.map((n) => {
+        const q = `Q${n}`;
         const p25 = data.byPeriod.find((p) => p.label === `${q} 2025`);
         const p26 = data.byPeriod.find((p) => p.label === `${q} 2026`);
         return {
@@ -333,15 +351,21 @@ export default function DashboardPage() {
           <>
             {/* KPI cards */}
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5">
-              <KpiCard label="2025 Total Purchases" value={egp(data.kpi.totalPurchase2025)} color={C.purchase} />
+              <KpiCard label="2025 Total Purchases" value={egp(data.kpi.totalPurchase2025)} sub={`Gross (before returns): ${egp(data.kpi.grossPurchase2025)}`} color={C.purchase} />
               <KpiCard label="2025 Total Sales" value={egp(data.kpi.totalSales2025)} sub={`Profit: ${egp(data.kpi.totalProfit2025)}`} color={C.sales} />
               <KpiCard
                 label="2025 Sell-Through"
-                value={pct(data.kpi.totalPurchase2025 > 0 ? (data.kpi.totalSales2025 / data.kpi.totalPurchase2025) * 100 : 0)}
-                sub="Sales ÷ Purchases value"
+                value={pct(data.kpi.unitSellThrough2025)}
+                sub="Units sold ÷ units bought"
                 color={C.profit}
               />
-              <KpiCard label="YTD 2026 Purchases" value={egp(data.kpi.ytdPurchase2026)} color={C.purchase} />
+              <KpiCard
+                label="2025 Revenue Recovery"
+                value={pct(data.kpi.totalPurchase2025 > 0 ? (data.kpi.totalSales2025 / data.kpi.totalPurchase2025) * 100 : 0)}
+                sub="Sales ÷ Purchases value"
+                color={C.sales}
+              />
+              <KpiCard label="YTD 2026 Purchases" value={egp(data.kpi.ytdPurchase2026)} sub={`Gross (before returns): ${egp(data.kpi.grossPurchase2026)}`} color={C.purchase} />
               <KpiCard
                 label="YTD 2026 Sales"
                 value={egp(data.kpi.ytdSales2026)}
@@ -397,24 +421,39 @@ export default function DashboardPage() {
               </ResponsiveContainer>
             </Section>
 
-            {/* Unit Cost Trend — negotiation core */}
+            {/* Effective unit cost trend — price inflation */}
             <Section
-              title="Average Unit Cost Trend (EGP) — what you're being charged"
-              explain="The effective price you pay per unit each quarter (purchase value ÷ units, returns excluded). A rising line means cost inflation — your strongest evidence to demand a price freeze or bigger rebate in the new contract."
+              title="Effective Unit Cost Trend — what you pay per unit"
+              explain="Average price you actually paid per unit each quarter (total spend ÷ units, bonus/free units included, returns excluded). A rising line means the manufacturer is quietly raising your cost — quote the % change at the negotiation table to push back."
             >
-              <ResponsiveContainer width="100%" height={280}>
-                <LineChart data={data.byPeriod} margin={{ top: 20, right: 20, left: 20, bottom: 5 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} domain={["auto", "auto"]} tickFormatter={(v) => v.toFixed(0)} />
-                  <Tooltip content={<ChartTooltip />} />
-                  <Line type="monotone" dataKey="avgUnitCost" name="Avg Unit Cost (EGP)" stroke="#ef4444" strokeWidth={3}
-                    dot={{ r: 5, fill: "#ef4444", strokeWidth: 2, stroke: "#fff" }} activeDot={{ r: 7 }}>
-                    <LabelList dataKey="avgUnitCost" position="top" fontSize={11} fontWeight={600} fill="#ef4444"
-                      formatter={(v) => Number(v).toFixed(1)} />
-                  </Line>
-                </LineChart>
-              </ResponsiveContainer>
+              {(() => {
+                const first = data.byPeriod.find((p) => p.avgUnitCost > 0)?.avgUnitCost ?? 0;
+                const last = [...data.byPeriod].reverse().find((p) => p.avgUnitCost > 0)?.avgUnitCost ?? 0;
+                const change = first > 0 ? ((last - first) / first) * 100 : 0;
+                return (
+                  <>
+                    {first > 0 && (
+                      <p className="mb-3 text-xs font-medium">
+                        <span className="text-zinc-400">First → latest quarter: </span>
+                        <span className={change > 0 ? "text-red-500 font-bold" : "text-emerald-600 font-bold"}>
+                          {change >= 0 ? "+" : ""}{change.toFixed(1)}%
+                        </span>
+                        <span className="text-zinc-400"> ({first.toLocaleString()} → {last.toLocaleString()} EGP/unit)</span>
+                      </p>
+                    )}
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart data={data.byPeriod} margin={{ top: 10, right: 20, left: 20, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
+                        <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} domain={["auto", "auto"]} />
+                        <Tooltip content={<ChartTooltip />} />
+                        <Line type="monotone" dataKey="avgUnitCost" name="Unit Cost (EGP)" stroke={C.purchase} strokeWidth={2.5}
+                          dot={{ r: 4, fill: C.purchase, strokeWidth: 2, stroke: "#fff" }} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </>
+                );
+              })()}
             </Section>
 
             {/* Distributor Price Comparison — negotiation core */}
@@ -458,6 +497,79 @@ export default function DashboardPage() {
               </Section>
             )}
 
+            {/* Best Distributor scorecard */}
+            {data.distributorScore.length > 0 && (
+              <Section
+                title="Best Distributor to Buy From — value ranking"
+                explain="Ranks each distributor by their effective unit price across the products you buy from more than one of them. Effective price already includes any bonus/free units (more units for the same money = lower price). 'Avg Premium' is how much more expensive they are on average than the cheapest option for the same product — 0% means they're consistently the best deal. 'Win Rate' is how often they were the cheapest. 'Extra Paid' is what their higher prices cost you vs always buying at the lowest."
+              >
+                {(() => {
+                  const ranked = data.distributorScore.filter((d) => d.avgPremiumPct !== null);
+                  const best = ranked[0];
+                  return (
+                    <>
+                      {best && (
+                        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+                          <span className="rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold uppercase tracking-wide text-white">Best Value</span>
+                          <span className="text-sm font-bold text-emerald-900">{best.supplier}</span>
+                          <span className="text-xs text-emerald-700">
+                            cheapest on {best.wins}/{best.sharedProducts} shared products
+                            {best.avgPremiumPct === 0 ? " · always the lowest price" : ` · only ${best.avgPremiumPct}% above the best on average`}
+                          </span>
+                        </div>
+                      )}
+                      <div className="overflow-x-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="border-b border-zinc-100">
+                              {["Rank","Distributor","Eff. Unit Price","Win Rate","Avg Premium","Shared Items","Extra Paid","Total Spend"].map((h) => (
+                                <th key={h} className="px-3 py-2.5 text-left text-xs font-semibold text-zinc-400 uppercase tracking-wide whitespace-nowrap">{h}</th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-50">
+                            {data.distributorScore.map((d, i) => {
+                              const comparable = d.avgPremiumPct !== null;
+                              const rank = comparable ? ranked.findIndex((r) => r.supplier === d.supplier) + 1 : null;
+                              return (
+                                <tr key={d.supplier} className={`hover:bg-zinc-50 transition-colors ${rank === 1 ? "bg-emerald-50/40" : ""}`}>
+                                  <td className="px-3 py-2.5 font-bold text-zinc-700">{rank ? `#${rank}` : "—"}</td>
+                                  <td className="px-3 py-2.5 font-medium text-zinc-700 max-w-[200px] truncate" title={d.supplier}>{d.supplier}</td>
+                                  <td className="px-3 py-2.5 text-right font-semibold text-zinc-800">{d.effectiveUnitCost.toLocaleString()}</td>
+                                  <td className="px-3 py-2.5 text-right">
+                                    {d.winRate === null ? <span className="text-zinc-300">—</span> : (
+                                      <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                                        d.winRate >= 60 ? "bg-emerald-50 text-emerald-700" :
+                                        d.winRate >= 30 ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-600"}`}>
+                                        {d.winRate}%
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2.5 text-right">
+                                    {d.avgPremiumPct === null ? <span className="text-zinc-300">sole supplier</span> : (
+                                      <span className={`font-semibold ${d.avgPremiumPct === 0 ? "text-emerald-600" : d.avgPremiumPct <= 5 ? "text-amber-600" : "text-red-500"}`}>
+                                        {d.avgPremiumPct === 0 ? "best" : `+${d.avgPremiumPct}%`}
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-3 py-2.5 text-right text-zinc-600">{comparable ? d.sharedProducts : "—"}</td>
+                                  <td className="px-3 py-2.5 text-right font-semibold text-red-500">{d.estimatedOverpay > 0 ? egp(d.estimatedOverpay) : "—"}</td>
+                                  <td className="px-3 py-2.5 text-right text-zinc-600">{egp(d.totalSpend)}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="mt-3 text-xs text-zinc-400 leading-relaxed">
+                        Distributors marked <span className="font-medium">&quot;sole supplier&quot;</span> only carry products no one else supplies, so they can&apos;t be price-compared head-to-head — but they&apos;re still listed by total spend.
+                      </p>
+                    </>
+                  );
+                })()}
+              </Section>
+            )}
+
             {/* Inventory build-up */}
             <Section
               title="Inventory Build-Up — units bought minus units sold"
@@ -484,7 +596,7 @@ export default function DashboardPage() {
             {/* YoY — quarter groups, 2025 beside 2026 */}
             {hasYoy && (
               <Section
-                title="Year-over-Year Comparison — Q1 & Q2"
+                title="Year-over-Year Comparison — by Quarter"
                 explain="Each quarter shows 2025 next to 2026 for the metric you pick. The % above each 2026 bar shows the change vs the same quarter last year — green means growth, red means decline."
               >
                 <div className="mb-4 flex items-center gap-2">
@@ -642,31 +754,6 @@ export default function DashboardPage() {
               </div>
             </Section>
 
-            {/* Profit trend */}
-            <Section
-              title="Profit Trend by Quarter (EGP)"
-              explain="Your net profit from this manufacturer's products over time. A consistent upward trend is your strongest argument for negotiating better rebate tiers in the new contract."
-            >
-              <ResponsiveContainer width="100%" height={260}>
-                <LineChart data={data.byPeriod} margin={{ top: 10, right: 20, left: 20, bottom: 5 }}>
-                  <defs>
-                    <linearGradient id="profitArea" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor={C.profit} stopOpacity={0.12} />
-                      <stop offset="95%" stopColor={C.profit} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
-                  <XAxis dataKey="label" tick={{ fontSize: 12, fill: "#94a3b8" }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: "#94a3b8" }} axisLine={false} tickLine={false} tickFormatter={(v) => (v / 1000).toFixed(0) + "k"} />
-                  <Tooltip content={<ChartTooltip />} />
-                  <Area type="monotone" dataKey="salesProfit" fill="url(#profitArea)" stroke="none" />
-                  <Line type="monotone" dataKey="salesProfit" name="Profit (EGP)" stroke={C.profit} strokeWidth={3}
-                    dot={{ r: 6, fill: C.profit, strokeWidth: 2.5, stroke: "#fff" }}
-                    activeDot={{ r: 8, fill: C.profit, stroke: "#fff", strokeWidth: 2 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </Section>
           </>
         )}
       </div>
